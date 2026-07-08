@@ -1,0 +1,79 @@
+.app {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 2rem 1rem;
+  font-family: system-ui, sans-serif;
+}
+
+.strategy-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  margin-bottom: 2rem;
+}
+
+.strategy-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-weight: 600;
+}
+
+.strategy-form fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.strategy-form .checkbox {
+  flex-direction: row;
+  align-items: center;
+  font-weight: 400;
+  gap: 0.35rem;
+}
+
+.strategy-form button {
+  align-self: flex-start;
+  padding: 0.6rem 1.2rem;
+  cursor: pointer;
+}
+
+.error {
+  color: #c0392b;
+}
+
+.results {
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+}
+
+dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+}
+
+dt {
+  font-weight: 600;
+}
+
+.code-block {
+  background: #1e1e1e;
+  color: #d4d4d4;
+  padding: 1rem;
+  overflow-x: auto;
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+
+.equity-curve {
+  color: #2563eb;
+  display: block;
+  margin-top: 0.5rem;
+}
+
+.notes {
+  color: #92400e;
+  font-size: 0.9rem;
+}
