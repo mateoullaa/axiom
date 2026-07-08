@@ -1,0 +1,26 @@
+# Secrets
+.env
+*.env
+credentials.json
+token.json
+
+# Data cache
+data_cache/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# Node / React
+node_modules/
+frontend/build/
+frontend/dist/
+
+# Editor/OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
