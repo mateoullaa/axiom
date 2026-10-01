@@ -43,7 +43,7 @@ for the full spec (pairs, timeframe profiles, indicators, sessions, risk levels)
 ## Language rule
 
 All project artifacts (code, docs, commit messages, comments) are written in **English**.
-Communication with the user happens in **Spanish**.
+Communication with the user happens in **English** too (Mateo's global rule since 2026-10-01).
 
 ## Skills & MCP
 
