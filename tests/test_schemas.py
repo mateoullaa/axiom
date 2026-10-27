@@ -12,7 +12,6 @@ from tools.schemas import (
     RiskComponent,
     RiskLevel,
     RuleTimeframe,
-    Session,
     StrategyInputs,
     StrategySpec,
     TimeframeProfile,
@@ -38,7 +37,9 @@ def _valid_spec():
             risk_level=RiskLevel.MEDIUM,
         ),
         entry_rules=[_valid_rule(PrimitiveRole.ENTRY, PrimitiveType.EMA_CROSS, RuleTimeframe.EXECUTION)],
-        confirmation_rules=[_valid_rule(PrimitiveRole.CONFIRMATION, PrimitiveType.EMA_BIAS, RuleTimeframe.CONFIRMATION)],
+        confirmation_rules=[
+            _valid_rule(PrimitiveRole.CONFIRMATION, PrimitiveType.EMA_BIAS, RuleTimeframe.CONFIRMATION)
+        ],
         sl_formula=RiskComponent(atr_multiple=1.5),
         tp_formula=RiskComponent(atr_multiple=3.0),
     )

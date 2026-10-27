@@ -51,5 +51,5 @@ def test_calibrated_combo_returns_full_populated_response():
     body = resp.json()
     assert body["strategy_sheet"]["pair"] == "BTC/USDT"
     assert "GeneratedStrategy" in body["code"]
-    assert body["metrics"]["profit_factor"] > 1
-    assert body["metrics"]["expectancy"] > 0
+    assert body["report"]["full"]["profit_factor"] > 1
+    assert body["report"]["full"]["expectancy"] > 0

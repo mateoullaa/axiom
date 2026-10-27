@@ -26,7 +26,7 @@ class TimeframeProfile(str, Enum):
 
 
 # Concrete (execution, confirmation) timeframe pair per profile — a specific pick from
-# each documented range in workflows/generate_strategy.md (e.g. scalping's "1m-5m" range
+# each documented range in docs/development/workflows/generate_strategy.md (e.g. scalping's "1m-5m" range
 # -> "5m"), made explicit here so every tool derives it from one source of truth.
 TIMEFRAME_PROFILE_MAP: dict[TimeframeProfile, tuple[str, str]] = {
     TimeframeProfile.SCALPING: ("5m", "15m"),
@@ -68,12 +68,18 @@ class RiskLevel(str, Enum):
     AGGRESSIVE = "aggressive"
 
 
+class Direction(str, Enum):
+    LONG = "long"
+    SHORT = "short"
+
+
 class StrategyInputs(BaseModel):
     pair: Pair
     timeframe_profile: TimeframeProfile
     session: Session | None = None
     indicators: list[Indicator]
     risk_level: RiskLevel
+    direction: Direction = Direction.LONG
 
 
 class PrimitiveRole(str, Enum):
@@ -106,6 +112,9 @@ class PrimitiveRule(BaseModel):
     primitive_type: PrimitiveType
     timeframe: RuleTimeframe
     params: dict[str, float] = Field(default_factory=dict)
+    # Trade side the rule is evaluated for. Directional primitives (crosses, biases) are
+    # mirrored for SHORT; non-directional ones (ADX, Volume, Volume Profile) ignore it.
+    direction: Direction = Direction.LONG
 
     @property
     def signal_column(self) -> str:
@@ -113,7 +122,8 @@ class PrimitiveRule(BaseModel):
         for this rule in the combined dataframe. Shared naming contract between
         indicators.py (producer) and code_generator.py (consumer) — change here only."""
         indicator_slug = self.indicator.value.lower().replace(" ", "_")
-        return f"sig_{indicator_slug}_{self.primitive_type.value}_{self.timeframe.value}"
+        suffix = "_short" if self.direction == Direction.SHORT else ""
+        return f"sig_{indicator_slug}_{self.primitive_type.value}_{self.timeframe.value}{suffix}"
 
 
 # Shared column-naming contract between tools/indicators.py (producer) and
@@ -135,20 +145,27 @@ class StrategySpec(BaseModel):
     confirmation_rules: list[PrimitiveRule] = Field(min_length=1)
     sl_formula: RiskComponent
     tp_formula: RiskComponent
+    # Fraction of equity committed per trade (backtesting.py `size` semantics: 0 < size < 1).
+    position_size: float = 0.5
     session_filter: Session | None = None
 
     def to_sheet(self) -> dict:
-        """Human-readable strategy sheet, per workflows/generate_strategy.md's
+        """Human-readable strategy sheet, per docs/development/workflows/generate_strategy.md's
         expected output."""
+        exec_tf, confirm_tf = TIMEFRAME_PROFILE_MAP[self.inputs.timeframe_profile]
         return {
             "pair": self.inputs.pair.value,
+            "direction": self.inputs.direction.value,
             "timeframe_profile": self.inputs.timeframe_profile.value,
+            "execution_timeframe": exec_tf,
+            "confirmation_timeframe": confirm_tf,
             "session": self.session_filter.value if self.session_filter else None,
             "risk_level": self.inputs.risk_level.value,
             "entry_rules": [r.model_dump() for r in self.entry_rules],
             "confirmation_rules": [r.model_dump() for r in self.confirmation_rules],
             "stop_loss": self.sl_formula.model_dump(),
             "take_profit": self.tp_formula.model_dump(),
+            "position_size": self.position_size,
         }
 
 
@@ -164,4 +181,51 @@ class BacktestMetrics(BaseModel):
     expectancy: float
     max_drawdown: float
     equity_curve: list[float]
+    # Taken from backtesting.py's own stats (None when undefined, e.g. zero trades).
+    return_pct: float | None = None
+    buy_hold_return_pct: float | None = None
+    cagr_pct: float | None = None
+    sharpe: float | None = None
+    sortino: float | None = None
+    exposure_pct: float | None = None
     notes: list[str] = Field(default_factory=list)
+
+
+class Trade(BaseModel):
+    entry_time: int  # unix seconds, UTC
+    exit_time: int
+    side: Direction
+    entry_price: float
+    exit_price: float
+    return_pct: float
+    exit_reason: str  # "stop-loss", "take-profit", "end of data" or "other"
+
+
+class Bar(BaseModel):
+    time: int  # unix seconds, UTC
+    open: float
+    high: float
+    low: float
+    close: float
+
+
+class SampleVerdict(str, Enum):
+    PASS = "pass"
+    FAIL = "fail"
+    INCONCLUSIVE = "inconclusive"
+
+
+class BacktestReport(BaseModel):
+    """Full-period metrics plus a chronological in-sample / out-of-sample split.
+
+    Rule constants are fixed by the catalog, not fitted per run, so the split is a
+    stability check: does the edge still hold on the most recent slice of data?"""
+
+    full: BacktestMetrics
+    in_sample: BacktestMetrics
+    out_of_sample: BacktestMetrics
+    split_time: int  # unix seconds of the first out-of-sample bar
+    oos_verdict: SampleVerdict
+    oos_reason: str
+    trades: list[Trade]
+    bars: list[Bar]

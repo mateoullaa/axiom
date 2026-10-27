@@ -10,7 +10,13 @@ confirmation-timeframe rules via a shift-then-forward-fill that only exposes a
 confirmation bar's value once it has actually closed (look-ahead-safe by construction —
 see _merge_confirmation), and always adds a raw ATR column plus a session-filter column
 when the strategy requires one.
+
+signal_spec() is the single mapping from a rule to the function (and arguments) that
+computes it. tools/code_generator.py reuses it to emit the exact same calls into the
+standalone strategy file, so exported code and in-app backtest can't drift apart.
 """
+
+from collections.abc import Callable
 
 import numpy as np
 import pandas as pd
@@ -20,6 +26,7 @@ from tools.schemas import (
     SESSION_COLUMN,
     TIMEFRAME_DURATION,
     TIMEFRAME_PROFILE_MAP,
+    Direction,
     PrimitiveRule,
     PrimitiveType,
     RuleTimeframe,
@@ -48,7 +55,7 @@ def compute_indicators(exec_df: pd.DataFrame, confirm_df: pd.DataFrame, spec: St
     confirm_timeframe = TIMEFRAME_PROFILE_MAP[spec.inputs.timeframe_profile][1]
     for rule in list(spec.entry_rules) + list(spec.confirmation_rules):
         if rule.timeframe == RuleTimeframe.EXECUTION:
-            signal = _compute_signal(exec_df, rule).reindex(exec_df.index).fillna(False).astype(bool)
+            signal = _as_exec_signal(_compute_signal(exec_df, rule), exec_df.index)
         else:
             raw_signal = _compute_signal(confirm_df, rule)
             signal = _merge_confirmation(exec_df.index, raw_signal, confirm_timeframe)
@@ -60,32 +67,56 @@ def compute_indicators(exec_df: pd.DataFrame, confirm_df: pd.DataFrame, spec: St
     return result
 
 
-def _compute_signal(df: pd.DataFrame, rule: PrimitiveRule) -> pd.Series:
+def signal_spec(rule: PrimitiveRule) -> tuple[Callable[..., pd.Series], dict]:
+    """(function, keyword arguments) that compute `rule`'s boolean signal from a
+    dataframe passed as the first positional argument."""
     p = rule.params
-    dispatch = {
-        PrimitiveType.EMA_CROSS: lambda: _ema_cross_above(df, p["fast_period"], p["slow_period"]),
-        PrimitiveType.EMA_BIAS: lambda: _ema_bias_bullish(df, p["period"]),
-        PrimitiveType.VWAP_CROSS: lambda: _vwap_cross_above(df),
-        PrimitiveType.VWAP_BIAS: lambda: _vwap_bias_bullish(df),
-        PrimitiveType.RSI_CROSS_ABOVE: lambda: _rsi_cross_above(df, p["threshold"]),
-        PrimitiveType.RSI_CROSS_BELOW: lambda: _rsi_cross_below(df, p["threshold"]),
-        PrimitiveType.RSI_BIAS: lambda: _rsi(df["Close"]) > p["midline"],
-        PrimitiveType.ADX_TREND_FILTER: lambda: _adx(df, ADX_PERIOD) > p["threshold"],
-        PrimitiveType.VOLUME_SPIKE_CONFIRMATION: lambda: _volume_spike(df, p["multiple"]),
-        PrimitiveType.VOLUME_PROFILE_NEAR_NODE: lambda: _volume_profile_near_node(
-            df, p["bin_count"], p["lookback_bars"], p["node_distance_pct"]
-        ),
-    }
-    if rule.primitive_type not in dispatch:
-        raise ValueError(f"no indicator implementation for primitive_type '{rule.primitive_type}'")
-    return dispatch[rule.primitive_type]()
+    short = rule.direction == Direction.SHORT
+    if rule.primitive_type == PrimitiveType.EMA_CROSS:
+        func = _ema_cross_below if short else _ema_cross_above
+        return func, {"fast_period": p["fast_period"], "slow_period": p["slow_period"]}
+    if rule.primitive_type == PrimitiveType.EMA_BIAS:
+        return (_ema_bias_bearish if short else _ema_bias_bullish), {"period": p["period"]}
+    if rule.primitive_type == PrimitiveType.VWAP_CROSS:
+        return (_vwap_cross_below if short else _vwap_cross_above), {}
+    if rule.primitive_type == PrimitiveType.VWAP_BIAS:
+        return (_vwap_bias_bearish if short else _vwap_bias_bullish), {}
+    if rule.primitive_type == PrimitiveType.RSI_CROSS_ABOVE:
+        return _rsi_cross_above, {"threshold": p["threshold"]}
+    if rule.primitive_type == PrimitiveType.RSI_CROSS_BELOW:
+        return _rsi_cross_below, {"threshold": p["threshold"]}
+    if rule.primitive_type == PrimitiveType.RSI_BIAS:
+        return (_rsi_below if short else _rsi_above), {"level": p["midline"]}
+    if rule.primitive_type == PrimitiveType.ADX_TREND_FILTER:
+        return _adx_above, {"threshold": p["threshold"]}
+    if rule.primitive_type == PrimitiveType.VOLUME_SPIKE_CONFIRMATION:
+        return _volume_spike, {"multiple": p["multiple"]}
+    if rule.primitive_type == PrimitiveType.VOLUME_PROFILE_NEAR_NODE:
+        return _volume_profile_near_node, {
+            "bin_count": p["bin_count"],
+            "lookback_bars": p["lookback_bars"],
+            "node_distance_pct": p["node_distance_pct"],
+        }
+    raise ValueError(f"no indicator implementation for primitive_type '{rule.primitive_type}'")
+
+
+def _compute_signal(df: pd.DataFrame, rule: PrimitiveRule) -> pd.Series:
+    func, kwargs = signal_spec(rule)
+    return func(df, **kwargs)
+
+
+def _as_exec_signal(signal: pd.Series, exec_index: pd.DatetimeIndex) -> pd.Series:
+    return signal.reindex(exec_index).fillna(False).astype(bool)
 
 
 def _merge_confirmation(exec_index: pd.DatetimeIndex, confirm_series: pd.Series, confirm_timeframe: str) -> pd.Series:
+    return _shift_and_align(exec_index, confirm_series, TIMEFRAME_DURATION[confirm_timeframe])
+
+
+def _shift_and_align(exec_index: pd.DatetimeIndex, confirm_series: pd.Series, offset: pd.Timedelta) -> pd.Series:
     """Shift confirm-TF values forward by one bar duration — so a confirm bar's value only
     becomes visible to exec-TF rows once that bar has actually closed — then forward-fill
     onto the execution index."""
-    offset = TIMEFRAME_DURATION[confirm_timeframe]
     shifted = confirm_series.copy()
     shifted.index = shifted.index + offset
     combined_index = exec_index.union(shifted.index)
@@ -95,6 +126,10 @@ def _merge_confirmation(exec_index: pd.DatetimeIndex, confirm_series: pd.Series,
 
 def _session_filter(df: pd.DataFrame, session: Session) -> pd.Series:
     start_hour, end_hour = SESSION_WINDOWS_UTC[session]
+    return _hours_in_window(df, start_hour, end_hour)
+
+
+def _hours_in_window(df: pd.DataFrame, start_hour: int, end_hour: int) -> pd.Series:
     hours = df.index.tz_convert("UTC").hour
     return pd.Series((hours >= start_hour) & (hours < end_hour), index=df.index)
 
@@ -158,7 +193,9 @@ def _volume_spike(df: pd.DataFrame, multiple: float, lookback: int = VOLUME_SPIK
     return df["Volume"] > (avg_volume * multiple)
 
 
-def _volume_profile_near_node(df: pd.DataFrame, bin_count: float, lookback_bars: float, node_distance_pct: float) -> pd.Series:
+def _volume_profile_near_node(
+    df: pd.DataFrame, bin_count: float, lookback_bars: float, node_distance_pct: float
+) -> pd.Series:
     """Rolling volume-profile point-of-control proximity check. For each bar, builds a
     price-binned volume histogram over the trailing `lookback_bars` window (inclusive of
     the current bar — no future data used) and flags whether the bar's close is within
@@ -217,6 +254,18 @@ def _rsi_cross_below(df: pd.DataFrame, threshold: float) -> pd.Series:
     return (rsi < threshold) & (rsi.shift(1) >= threshold)
 
 
+def _ema_cross_below(df: pd.DataFrame, fast_period: float, slow_period: float) -> pd.Series:
+    fast = _ema(df["Close"], fast_period)
+    slow = _ema(df["Close"], slow_period)
+    return (fast < slow) & (fast.shift(1) >= slow.shift(1))
+
+
+def _vwap_cross_below(df: pd.DataFrame) -> pd.Series:
+    vwap = _vwap(df)
+    close = df["Close"]
+    return (close < vwap) & (close.shift(1) >= vwap.shift(1))
+
+
 # --- Confirmation-primitive signals (bias, evaluated wherever they're dispatched) ----
 
 
@@ -227,3 +276,24 @@ def _ema_bias_bullish(df: pd.DataFrame, period: float) -> pd.Series:
 
 def _vwap_bias_bullish(df: pd.DataFrame) -> pd.Series:
     return df["Close"] > _vwap(df)
+
+
+def _ema_bias_bearish(df: pd.DataFrame, period: float) -> pd.Series:
+    ema = _ema(df["Close"], period)
+    return df["Close"] < ema
+
+
+def _vwap_bias_bearish(df: pd.DataFrame) -> pd.Series:
+    return df["Close"] < _vwap(df)
+
+
+def _rsi_above(df: pd.DataFrame, level: float) -> pd.Series:
+    return _rsi(df["Close"]) > level
+
+
+def _rsi_below(df: pd.DataFrame, level: float) -> pd.Series:
+    return _rsi(df["Close"]) < level
+
+
+def _adx_above(df: pd.DataFrame, threshold: float) -> pd.Series:
+    return _adx(df, ADX_PERIOD) > threshold

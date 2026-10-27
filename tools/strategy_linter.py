@@ -1,5 +1,5 @@
 """Objectivity/executability gate — implements the checklist in
-workflows/validate_strategy.md mechanically against a StrategySpec.
+docs/development/workflows/validate_strategy.md mechanically against a StrategySpec.
 
 Runs as defense in depth on top of the schema's own type constraints (see
 tools/schemas.py): a StrategySpec can only be *constructed* validly through pydantic,
@@ -10,7 +10,16 @@ constructor. Never short-circuits — collects every violation before returning.
 
 import math
 
-from tools.schemas import Indicator, LintResult, PrimitiveType, RuleTimeframe, StrategySpec, TimeframeProfile
+from tools.schemas import (
+    Direction,
+    Indicator,
+    LintResult,
+    PrimitiveRole,
+    PrimitiveType,
+    RuleTimeframe,
+    StrategySpec,
+    TimeframeProfile,
+)
 
 ALLOWED_PRIMITIVES_BY_INDICATOR: dict[Indicator, set[PrimitiveType]] = {
     Indicator.RSI: {PrimitiveType.RSI_CROSS_ABOVE, PrimitiveType.RSI_CROSS_BELOW, PrimitiveType.RSI_BIAS},
@@ -46,6 +55,8 @@ def lint(spec: StrategySpec) -> LintResult:
     violations += _check_tp_defined(spec)
     violations += _check_confirmation_present(spec)
     violations += _check_session_filter(spec)
+    violations += _check_direction(spec, all_rules)
+    violations += _check_position_size(spec)
 
     return LintResult(passed=len(violations) == 0, violations=violations)
 
@@ -104,4 +115,35 @@ def _check_session_filter(spec: StrategySpec) -> list[str]:
         return ["scalping strategy is missing its required session filter"]
     if not is_scalping and spec.session_filter is not None:
         return [f"session filter present on a non-scalping ({spec.inputs.timeframe_profile.value}) strategy"]
+    return []
+
+
+# An RSI entry only makes sense on one side: buy the cross back above oversold, sell the
+# cross back below overbought.
+RSI_ENTRY_SIDE = {
+    PrimitiveType.RSI_CROSS_ABOVE: Direction.LONG,
+    PrimitiveType.RSI_CROSS_BELOW: Direction.SHORT,
+}
+
+
+def _check_direction(spec: StrategySpec, rules) -> list[str]:
+    violations = []
+    side = spec.inputs.direction
+    for rule in rules:
+        if rule.direction != side:
+            violations.append(
+                f"rule '{rule.primitive_type}' is evaluated for {rule.direction.value} but the "
+                f"strategy trades {side.value}"
+            )
+        expected = RSI_ENTRY_SIDE.get(rule.primitive_type)
+        if rule.role == PrimitiveRole.ENTRY and expected is not None and expected != side:
+            violations.append(
+                f"entry '{rule.primitive_type}' only applies to {expected.value} strategies"
+            )
+    return violations
+
+
+def _check_position_size(spec: StrategySpec) -> list[str]:
+    if not 0 < spec.position_size < 1:
+        return [f"position size {spec.position_size} must be a fraction of equity in (0, 1)"]
     return []

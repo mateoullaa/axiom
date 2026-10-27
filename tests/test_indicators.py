@@ -6,10 +6,7 @@ from tools import indicators as ind
 from tools.schemas import (
     Indicator,
     Pair,
-    PrimitiveRole,
-    PrimitiveRule,
     RiskLevel,
-    RuleTimeframe,
     Session,
     StrategyInputs,
     TimeframeProfile,
@@ -110,7 +107,7 @@ def test_session_filter_flags_correct_utc_hours():
 def test_volume_profile_flags_near_and_far_from_the_dominant_price_cluster():
     rows = []
     # 20 bars clustered tightly around price 100 with heavy volume.
-    for i in range(20):
+    for _ in range(20):
         rows.append([100.0, 100.5, 99.5, 100.0, 1000.0])
     # One bar far away from the cluster, with low volume — shouldn't move the node.
     rows.append([150.0, 150.5, 149.5, 150.0, 10.0])

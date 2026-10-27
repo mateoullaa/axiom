@@ -6,7 +6,7 @@ why ETFs were chosen over raw index/futures tickers: real intraday volume, and d
 tradable by a retail user).
 
 Canonical timeframe strings used throughout this project: "5m", "15m", "1h", "4h", "1d",
-"1w" (see workflows/generate_strategy.md's timeframe profiles). Binance supports all six
+"1w" (see docs/development/workflows/generate_strategy.md's timeframe profiles). Binance supports all six
 natively. yfinance has no native 4h interval, so 4h bars are derived by resampling cached
 1h data — never cached separately, so there's exactly one source of truth per pair.
 """
@@ -54,24 +54,52 @@ STALENESS = {
 
 OHLCV_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
 
+# Default history per timeframe. Intraday windows are capped by what yfinance serves
+# (5m/15m: last 60 days; 60m: last 730 days) so every pair gets the same depth; daily and
+# weekly go back ~8 years so the weekly EMA confirmation has room to warm up.
+LOOKBACK_DAYS = {
+    "5m": 59,
+    "15m": 59,
+    "1h": 729,
+    "4h": 729,
+    "1d": 3000,
+    "1w": 3000,
+}
+
+# A cache whose last full fetch asked for a window starting this much later than the one
+# requested now (i.e. it was built with a shorter lookback) is rebuilt instead of only
+# topped up. Comparing requested starts, not the first cached bar, avoids refetching
+# forever when the source simply has no older data (e.g. BTC/USDT before Aug 2017).
+COVERAGE_TOLERANCE = timedelta(days=7)
+
 
 class DataFetchError(Exception):
     pass
 
 
-def fetch_ohlcv(pair: Pair, timeframe: str, lookback_days: int = 365) -> pd.DataFrame:
+def fetch_ohlcv(pair: Pair, timeframe: str, lookback_days: int | None = None) -> pd.DataFrame:
     """Freshest available OHLCV data for `pair`/`timeframe` (UTC DatetimeIndex, columns
-    Open/High/Low/Close/Volume), using a local parquet cache with incremental refresh."""
+    Open/High/Low/Close/Volume), using a local parquet cache with incremental refresh.
+    `lookback_days` defaults to LOOKBACK_DAYS for the timeframe."""
     if timeframe not in TIMEFRAME_SPECS:
         raise DataFetchError(f"unsupported timeframe '{timeframe}'")
+    if lookback_days is None:
+        lookback_days = LOOKBACK_DAYS[timeframe]
 
     if timeframe == "4h" and pair != Pair.BTC_USDT:
         base = fetch_ohlcv(pair, "1h", lookback_days)
         return _resample_to_4h(base)
 
     cached = _load_cache(pair, timeframe)
+    wanted_start = _utcnow() - timedelta(days=lookback_days)
+    if cached is not None and not cached.empty:
+        covered_since = _load_requested_start(pair, timeframe) or cached.index[0]
+        if covered_since > wanted_start + COVERAGE_TOLERANCE:
+            cached = None  # built for a shorter window: rebuild instead of topping up
     if cached is None or cached.empty or (_utcnow() - cached.index[-1]) > STALENESS[timeframe]:
         cached = _refresh(pair, timeframe, cached, lookback_days)
+    if cached.empty:
+        raise DataFetchError(f"no {timeframe} market data returned for {pair.value}")
     return cached
 
 
@@ -92,6 +120,7 @@ def _refresh(pair: Pair, timeframe: str, cached_df: pd.DataFrame | None, lookbac
     else:
         since = _utcnow() - timedelta(days=lookback_days)
         merged = _fetch_from_source(pair, timeframe, since)
+        _save_requested_start(pair, timeframe, since)
 
     _save_cache(pair, timeframe, merged)
     return merged
@@ -186,6 +215,22 @@ def _load_cache(pair: Pair, timeframe: str) -> pd.DataFrame | None:
 def _save_cache(pair: Pair, timeframe: str, df: pd.DataFrame) -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     df.to_parquet(_cache_path(pair, timeframe))
+
+
+def _requested_start_path(pair: Pair, timeframe: str) -> Path:
+    return _cache_path(pair, timeframe).with_suffix(".since")
+
+
+def _load_requested_start(pair: Pair, timeframe: str) -> datetime | None:
+    path = _requested_start_path(pair, timeframe)
+    if not path.exists():
+        return None
+    return datetime.fromisoformat(path.read_text(encoding="utf-8").strip())
+
+
+def _save_requested_start(pair: Pair, timeframe: str, since: datetime) -> None:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    _requested_start_path(pair, timeframe).write_text(since.isoformat(), encoding="utf-8")
 
 
 def _utcnow() -> datetime:
