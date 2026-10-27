@@ -1,156 +1,172 @@
-# Strategy Creator
+# Axiom
 
-**A full-stack tool that generates 100% systematic, backtested trading strategies —
-deterministically, with zero AI in the runtime loop.**
+[![ci](https://github.com/mateoullaa/axiom/actions/workflows/ci.yml/badge.svg)](https://github.com/mateoullaa/axiom/actions/workflows/ci.yml)
+![python](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue)
+![tests](https://img.shields.io/badge/tests-90%20offline%20%2B%203%20live-success)
+[![license](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 
-You pick a pair, a timeframe profile, a handful of indicators, and a risk level. The
-backend composes an objective, rule-based strategy from a closed catalog of primitives,
-mechanically verifies it can't contain any discretionary logic, renders it as standalone
-Python you can run yourself, and backtests it against real market data — all before it
-ever reaches your screen.
+**Rules, not predictions.** Axiom builds fully mechanical trading strategies from a closed
+catalog of rules, exports each one as a standalone Python file, and backtests that exact
+file on real market data, with an out-of-sample check. There is no AI in the loop: the same
+inputs always produce the same strategy, byte for byte.
 
-## Why this project
+![Axiom demo](docs/assets/demo.gif)
 
-Most "AI strategy generator" demos ask an LLM to freestyle trading rules at request time.
-That's fast to build and impossible to trust: the same prompt can yield a different
-strategy tomorrow, and nothing stops the model from inventing a condition like "if the
-chart looks bullish." A strategy that isn't 100% mechanical can't be automated, audited,
-or reasoned about mathematically.
+## Why
 
-This project takes the opposite bet: **push all reasoning into deterministic code, and
-keep it out of the runtime path entirely.**
+Ask an LLM for a trading strategy and you get rules like "enter when momentum looks strong".
+Nobody can automate or audit that, and the same prompt gives a different answer tomorrow.
+Axiom takes the opposite bet and pushes every decision into deterministic code:
 
-- Every strategy is built by composing a fixed, closed catalog of objective primitives
-  (e.g. *"RSI crosses above 30"*, *"ADX > threshold"*, *"SL = entry − N × ATR"*) — never
-  free-form conditions.
-- A linter mechanically checks every generated strategy against that catalog before it's
-  shown to the user: closed-catalog compliance, TP/SL always defined, a confirmation rule
-  from a higher timeframe always present, no unbound thresholds.
-- The same inputs always produce the exact same strategy — byte-identical generated code,
-  every time.
-- Every risk-level parameter (SL/TP sizing, entry thresholds) is empirically validated
-  against real historical data, not just asserted — see [Results](#results) below.
-
-The result reads less like a chatbot demo and more like a small compiler: **inputs →
-closed-catalog IR → validated → codegen → backtest**, with a human-readable strategy
-sheet at every step of the way.
+- **Closed catalog.** A strategy can only be built from objective primitives such as
+  *EMA(12) crosses above EMA(26)*, *ADX(14) > 20*, *stop = entry − 1.5 × ATR(14)*.
+  Anything else cannot even be constructed: the catalog is a set of Pydantic enums.
+- **Linted before it exists.** A linter rejects any strategy with an undefined stop or
+  target, a missing higher-timeframe confirmation, a rule on the wrong side, or an unbound
+  threshold. The code generator re-lints before it renders a single line.
+- **The file you download is the file that was tested.** The API backtests the generated
+  module itself, and a test asserts it computes exactly the same signals as the reference
+  implementation.
+- **Honest results.** Every backtest is split 70/30 in time. A strategy only "passes" if its
+  edge exists in-sample *and* survives the unseen 30%. Fewer than 5 out-of-sample trades
+  is reported as inconclusive, not as a win.
 
 ## How it works
 
-```
-┌────────────┐   POST /api/strategy    ┌──────────────────────────────────────────┐
-│  React UI  │ ───────────────────────▶│              FastAPI backend              │
-│  (Vite)    │◀─────────────────────── │  (thin orchestration, zero business logic) │
-└────────────┘   sheet + code + metrics└──────────────────────────────────────────┘
-                                                        │
-                                                        ▼
-        ┌─────────────────────────────────────────────────────────────────────┐
-        │ 1. compose_strategy()   closed-catalog primitives → StrategySpec     │
-        │ 2. lint()               mechanically reject anything non-objective   │
-        │ 3. generate_code()      render a standalone backtesting.py Strategy  │
-        │ 4. fetch_ohlcv()        Binance / yfinance, local parquet cache      │
-        │ 5. compute_indicators() hand-rolled RSI/EMA/ADX/ATR/VWAP/Vol.Profile │
-        │ 6. run_backtest()       real profit factor, win rate, drawdown       │
-        └─────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    UI[React UI] -->|POST /api/strategy| A
+    subgraph API [FastAPI · thin orchestration]
+        A[compose_strategy<br/>inputs → closed-catalog spec] --> B[lint<br/>reject anything non-objective]
+        B --> C[generate_code<br/>standalone .py]
+        D[fetch_ohlcv<br/>Binance · Yahoo · parquet cache] --> E
+        C --> E[run the generated module<br/>compute_signals + Strategy]
+        E --> F[run_report<br/>full · in-sample · out-of-sample]
+    end
+    F -->|sheet + code + report| UI
 ```
 
-Each numbered step is an independently testable, single-purpose module under
-[`tools/`](tools/) — no step trusts the one before it blindly (the code generator
-re-lints before rendering; the strategy linter re-checks the catalog even though the
-type system already constrains it). See [`CLAUDE.md`](CLAUDE.md) and
-[`workflows/`](workflows/) for the full design rationale.
+Each box is a single-purpose module in [`tools/`](tools/) with its own tests.
 
-## Engineering highlights
+| Overview | Rules |
+|---|---|
+| ![Overview: KPIs, equity vs buy & hold, drawdown](docs/assets/overview.png) | ![Rules in plain English](docs/assets/rules.png) |
+| **Chart** | **Code** |
+| ![Candles with every entry and exit](docs/assets/chart.png) | ![The exported standalone file](docs/assets/code.png) |
 
-- **Look-ahead-bias-safe by construction.** Confirmation-timeframe signals are shifted
-  forward by a full bar period before being merged into the execution timeframe, so a
-  4h bar's value only becomes visible to 1h rows *after* it has actually closed —
-  covered by a dedicated regression test, not just asserted in a docstring.
-- **Correctness-by-construction, not by convention.** Every enum in the data contract
-  (`tools/schemas.py`) is a real `Enum`, so an out-of-catalog primitive type is a
-  `ValidationError` at construction time, not a runtime surprise three layers down.
-- **No hidden dependencies.** RSI, ADX, ATR, EMA, VWAP, and a rolling Volume Profile are
-  all hand-rolled in plain pandas/numpy — no TA-Lib (C-library install pain on Windows),
-  no black-box indicator library. Every formula is auditable in one file.
-- **62 tests**, including unit coverage for every pipeline stage, a look-ahead-bias
-  regression, an objectivity-linter test per rejection rule, and one full end-to-end
-  integration test that scripts a real strategy through the entire pipeline and asserts
-  all four project success criteria in a single run.
-- **Empirically validated, not just asserted.** Risk-level parameters were tuned against
-  real cached market data until a working combo cleared profit factor > 1 with positive
-  expectancy at every risk tier — the failed attempts are documented alongside the
-  winning one in [`docs/calibration_notes.md`](docs/calibration_notes.md), not hidden.
+## What it does today
+
+| Input | Options |
+|---|---|
+| Market | BTC/USDT (Binance) · SP500, Nasdaq, Gold (SPY, QQQ, GLD via Yahoo Finance) |
+| Direction | Long or short (directional rules are mirrored) |
+| Timeframe | Scalping 5m/15m · Intraday 1h/4h · Swing 1d/1w (execution / confirmation) |
+| Session (scalping) | Asia, London, NY AM, NY PM (UTC) |
+| Entry signal | EMA cross, RSI out of oversold/overbought, VWAP cross |
+| Filters | ADX trend strength, volume spike, volume-profile point of control |
+| Risk | Stop/target in ATR multiples and position size (25%, 50% or 95% of equity) |
+
+Output: a readable strategy sheet, a standalone Python file, and a report with profit
+factor, expectancy, win rate, max drawdown, return vs buy & hold, CAGR, Sharpe, Sortino,
+exposure, every trade, and the in-sample / out-of-sample comparison.
 
 ## Results
 
-Backtested against real BTC/USDT data (Binance), swing profile (1D execution / 1W
-confirmation), single-EMA strategy:
+Reproducible with `python scripts/reproduce_results.py` (fixed window 2019-01-01 to
+2026-07-01, UTC, 0.1% commission per side, 70/30 chronological split):
 
-| Risk level   | Trades | Win rate | Profit factor | Expectancy/trade | Max drawdown |
-|--------------|:------:|:--------:|:--------------:|:-----------------:|:-------------:|
-| Conservative |   13   |  76.9%   |     4.57       |      +2.92%        |     6.7%      |
-| Medium       |   13   |  46.2%   |     1.40       |      +1.21%        |    24.1%      |
-| Aggressive   |   11   |  45.5%   |     2.09       |      +4.67%        |    28.5%      |
+| Strategy | Trades | Win rate | Profit factor | Expectancy / trade | Max DD | Return | Buy & hold | IS PF | OOS PF (trades) | Out-of-sample |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| BTC/USDT · swing · EMA · conservative · long | 20 | 65% | 1.99 | +1.7% | 3.3% | +7.2% | +1443.9% | 1.39 | 3.31 (10) | pass |
+| BTC/USDT · swing · EMA · medium · long | 20 | 45% | 1.27 | +1.0% | 12.1% | +6.8% | +1443.9% | 1.40 | 1.12 (10) | pass |
+| BTC/USDT · swing · EMA · aggressive · long | 18 | 44% | 1.90 | +4.7% | 27.5% | +78.6% | +1443.9% | 2.13 | 1.59 (8) | pass |
+| BTC/USDT · swing · EMA · medium · short | 13 | 23% | 0.34 | -4.0% | 30.2% | -23.4% | +1443.9% | 0.15 | 2.36 (3) | inconclusive |
+| SP500 · swing · EMA · medium · long | 18 | 44% | 1.12 | +0.2% | 5.0% | +1.2% | +198.5% | 1.31 | 0.85 (7) | fail |
+| Gold · swing · EMA · medium · long | 24 | 46% | 1.96 | +0.7% | 2.9% | +8.4% | +203.6% | 1.84 | 2.26 (6) | pass |
 
-Full methodology, including the combinations that *didn't* clear the bar, is in
+How to read it:
+
+- The swing EMA long strategy has a positive edge on BTC/USDT and Gold, and it holds out
+  of sample.
+- **It loses badly to buy & hold.** It is in the market a small fraction of the time and
+  risks a fraction of equity per trade. The table is evidence that the rules engine
+  produces testable strategies, not a claim that they beat the market.
+- Samples are small (13–24 trades over 7.5 years), so read them as "viable", not as
+  precise estimates of an edge. Shorting BTC lost money in-sample, and SP500's edge did
+  not survive out of sample. Both are shown on purpose.
+
+Earlier calibration runs, including the combinations that failed, are in
 [`docs/calibration_notes.md`](docs/calibration_notes.md).
 
-## Tech stack
+## Engineering highlights
 
-| Layer               | Choice                                                          |
-|----------------------|------------------------------------------------------------------|
-| Rules engine / linter / codegen | Python, Pydantic v2 (closed-catalog enums as the enforcement mechanism) |
-| Indicators           | Hand-rolled pandas/numpy (Wilder-smoothed RSI/ATR/ADX, session-anchored VWAP, rolling Volume Profile) |
-| Data                 | Binance REST API (crypto) + yfinance ETF proxies (SPY/QQQ/GLD for equities/gold), local Parquet cache with incremental refresh |
-| Backtesting          | [`backtesting.py`](https://kernc.github.io/backtesting.py/) |
-| Backend              | FastAPI |
-| Frontend             | React + Vite |
-| Testing              | pytest (62 tests: unit, integration, look-ahead-bias regression, end-to-end) |
+- **No look-ahead.** Higher-timeframe signals are shifted forward one full bar before being
+  merged, so a weekly value is only visible after that week has closed. A regression test
+  covers it.
+- **One mapping, two consumers.** `signal_spec()` maps each rule to the function that
+  computes it. The backtest and the code generator both use it, and the generator copies
+  the indicator source with `inspect`, resolving dependencies, so the math exists in one
+  place.
+- **Hand-rolled indicators.** RSI, ATR and ADX (Wilder smoothing), EMA, session-anchored
+  VWAP and a rolling volume profile are written in plain pandas/numpy, auditable in
+  [`tools/indicators.py`](tools/indicators.py).
+- **Invalid combinations are rejected, not silently run.** VWAP on daily or weekly bars,
+  ETFs in the Asia session, or a strategy with no entry signal return a specific message.
+  Data outages return a JSON 502 instead of a crash.
+- **Data layer.** Parquet cache with incremental refresh. Lookbacks respect Yahoo's
+  intraday limits (60 days for 5m/15m, 730 for 1h), and a sidecar records the requested
+  window so a short source history is never refetched in a loop.
+- **93 tests**: unit tests per pipeline stage, the look-ahead regression, generated code
+  vs reference equivalence, the generated file run as a subprocess in isolated mode, and
+  API error paths. 3 of them hit live data and are opt-in (`pytest -m integration`).
 
 ## Getting started
 
-**Backend**
+```bash
+# Backend (Python 3.12+)
+python -m venv .venv && source .venv/bin/activate      # .venv\Scripts\activate on Windows
+pip install -r requirements-dev.txt
+pytest                                                 # 90 offline tests
+uvicorn backend.main:app --port 8000
+
+# Frontend (Node 20.19+)
+cd frontend && npm install && npm run dev              # http://localhost:5173, proxies /api
+```
+
+Run an exported strategy on your own data:
 
 ```bash
-python -m venv .venv
-.venv\Scripts\activate          # Windows; use `source .venv/bin/activate` on macOS/Linux
-pip install -r requirements.txt
-
-python init.py                  # pre-flight structure/test check
-pytest                          # 59 tests, network-dependent ones excluded by default
-pytest -m integration           # the 3 tests that hit real Binance/yfinance data
-
-uvicorn backend.main:app --reload --port 8000
+python axiom_btcusdt_swing_long_medium.py btc_1d.csv btc_1w.csv
 ```
 
-**Frontend**
+## Tech stack
 
-```bash
-cd frontend
-npm install
-npm run dev                     # proxies /api/* to localhost:8000
-```
+Python · FastAPI · Pydantic v2 · pandas/numpy · [backtesting.py](https://kernc.github.io/backtesting.py/) ·
+React 19 · Vite · Tailwind CSS · [TradingView Lightweight Charts™](https://www.tradingview.com/lightweight-charts/) ·
+pytest · ruff · GitHub Actions
 
-## Project structure
+## How it was built
 
-```
-tools/                  Deterministic pipeline — the actual product logic
-  schemas.py               Shared data contract (Pydantic models, closed-catalog enums)
-  strategy_rules_engine.py Composes a StrategySpec from user inputs
-  strategy_linter.py       Mechanically enforces objectivity/executability
-  code_generator.py        Renders a standalone backtesting.py Strategy
-  fetch_market_data.py     Binance/yfinance + Parquet caching, incremental refresh
-  indicators.py            Hand-rolled indicator math + look-ahead-safe signal merging
-  backtest_runner.py       Wraps backtesting.py, returns objective metrics
-backend/main.py          Thin FastAPI orchestration layer
-frontend/                React + Vite UI
-tests/                   62 tests mirroring the pipeline, 1:1 with tools/
-workflows/                Design-spec docs — the source of truth each tool implements
-docs/calibration_notes.md Empirical risk-parameter validation, methodology + results
-```
+Axiom was built with a structured, AI-assisted workflow in
+[Claude Code](https://claude.com/claude-code): one agent working through sequential
+**planner → builder → reviewer** roles, where the reviewer blocks progress on any failed
+check and records the lesson. I wrote the spec, made the design calls and validated the
+results against real data. Unlike the product, the development process used an LLM.
+The product itself has none at runtime.
 
-## Disclaimer
+- [`docs/development/workflows/`](docs/development/workflows/): the spec each tool implements
+- [`docs/development/memory.md`](docs/development/memory.md): bugs found and lessons learned
+- [`docs/development/roles/`](docs/development/roles/): the role definitions
 
-This is a personal engineering project exploring systematic strategy generation and
-backtesting. Nothing here is financial advice, and a backtest — however rigorously
-computed — is not a guarantee of future performance.
+## Limitations
+
+- One position at a time, one entry signal per strategy (first selected of EMA › VWAP › RSI).
+- Equity indices and gold are traded through ETF proxies, with raw (unadjusted) prices.
+- Intraday history is short (about 60 days of 5m bars), so scalping results rarely have
+  enough trades to be meaningful. The out-of-sample verdict says so.
+- `api.binance.com` is geo-blocked in some regions, including the US.
+
+## License
+
+[MIT](LICENSE) © 2026 Mateo Ulla. Educational project, not financial advice: a backtest,
+however careful, does not predict future performance.
