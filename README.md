@@ -86,8 +86,9 @@ Reproducible with `python scripts/reproduce_results.py` (fixed window 2019-01-01
 
 How to read it:
 
-- The swing EMA long strategy has a positive edge on BTC/USDT and Gold, and it holds out
-  of sample.
+- The swing EMA long strategy has a positive edge on BTC/USDT and Gold, and it passes the
+  out-of-sample split. That split is not a clean holdout: the window was already in the
+  data used to pick this configuration (see [Limitations](#limitations)).
 - **It loses badly to buy & hold.** It is in the market a small fraction of the time and
   risks a fraction of equity per trade. The table is evidence that the rules engine
   produces testable strategies, not a claim that they beat the market.
@@ -161,6 +162,12 @@ The product itself has none at runtime.
 ## Limitations
 
 - One position at a time, one entry signal per strategy (first selected of EMA › VWAP › RSI).
+- Position size is a fixed fraction of equity, not a fixed risk per trade. On BTC/USDT daily
+  bars (median ATR 4.2% of price, 2019–2026) the stop risks about 1%, 3% and 8% of equity
+  at the conservative, medium and aggressive tiers.
+- The swing EMA case was chosen in July 2026 on about 4 years of data, which covers the whole
+  out-of-sample window of the results table (from 2024-03-31). Read the out-of-sample pass
+  as weak evidence, not as a holdout.
 - Equity indices and gold are traded through ETF proxies, with raw (unadjusted) prices.
 - Intraday history is short (about 60 days of 5m bars), so scalping results rarely have
   enough trades to be meaningful. The out-of-sample verdict says so.
