@@ -1,6 +1,6 @@
 # Empirical risk-level calibration (Task 9)
 
-Per `workflows/generate_strategy.md`'s deferral ("exact constants are calibrated in code
+Per `docs/development/workflows/generate_strategy.md`'s deferral ("exact constants are calibrated in code
 and validated via backtest, not asserted here"), this records what was actually run
 against real cached market data, and which combo(s) clear the profitability bar
 (profit factor > 1, positive expectancy) at each risk level.
@@ -52,3 +52,12 @@ statistically robust edge estimate.
 expectancy +1.21% per trade, 13 trades, clears both success-criterion bars without being
 the cherry-picked best number (conservative's 4.574 is stronger but medium is the more
 representative "typical user" choice).
+
+## Update (2026-10): longer window, out-of-sample split, risk-tier sizing
+
+The table above was run on ~4 years of data with full-equity sizing and no split. The
+current numbers, on a fixed window (2019-01-01 to 2026-07-01) with risk-tier position sizing
+and a 70/30 chronological split, are produced by `scripts/reproduce_results.py` and shown
+in the README. The swing EMA long strategy still clears profit factor > 1 at every risk
+level, in-sample and out-of-sample; it trails buy & hold by a wide margin because it is in
+the market only a small fraction of the time.

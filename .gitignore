@@ -24,3 +24,7 @@ frontend/dist/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Dev-only capture artifacts
+docs/assets/*.webm
+data_cache/*.since
